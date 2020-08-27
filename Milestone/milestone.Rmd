@@ -1,0 +1,179 @@
+---
+title: "Data Science Capstone Milestone Report"
+author: "Jon Ting"
+date: "24/08/2020"
+output: html_document
+---
+
+```{r Setup, warning=F, results=F}
+knitr::opts_chunk$set(echo=T)
+suppressPackageStartupMessages(library(downloader))
+suppressPackageStartupMessages(library(ngram))
+suppressPackageStartupMessages(library(tm))
+suppressPackageStartupMessages(library(wordcloud2))
+suppressPackageStartupMessages(library(htmlwidgets))
+suppressPackageStartupMessages(library(webshot))
+suppressPackageStartupMessages(library(ggplot2))
+```
+
+## Introduction
+This is a milestone report for the project regarding analysis of the SwiftKey data set.
+
+The purpose for this report is to:  
+
+ - Demonstrate that the Swiftkey data downloaded from Coursera website has been loaded into R.  
+ - Create a basic report of summary statistics about the datasets.  
+ - Report interesting findings about the datasets.  
+ - Present plans to create a prediction algorithm and Shiny app from the data.
+
+## Load and Summarize Data
+The Swiftkey data contains blog entries, news entries, and twitter feeds in four different languages, which are German, English, Russian, and Finnish, respectively. The English dataset is processed with reference to the other 3 datasets to match the foreign language words embedded in the data.
+``` {r Load and summarize data, cache=T, warning=F}
+# Download and extract data
+Url <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+if(!file.exists("../Coursera-SwiftKey.zip")) { download.file(Url, destfile="../Coursera-SwiftKey.zip", mode="wb") }
+if(!file.exists("../final")) { unzip(zipfile="../Coursera-SwiftKey.zip", exdir="../") }
+
+# Load data
+blogs <- readLines("../final/en_US/en_US.blogs.txt", skipNul=T, encoding="UTF-8")
+news <- readLines("../final/en_US/en_US.news.txt", skipNul=T, encoding="UTF-8")
+twits <- readLines("../final/en_US/en_US.twitter.txt", skipNul=T, encoding="UTF-8")
+
+# Size of the en_US datasets (bytes)
+blogs_size <- file.info("../final/en_US/en_US.blogs.txt")$size / 1024
+news_size <- file.info("../final/en_US/en_US.news.txt")$size / 1024
+twits_size <- file.info("../final/en_US/en_US.twitter.txt")$size / 1024
+
+# Basic summary of each dataset
+blogs_summ <- summary(blogs)
+news_summ <- summary(news)
+twits_summ <- summary(twits)
+
+# Summary of number of characters in each dataset
+blogs_cc <- summary(nchar(blogs))
+news_cc <- summary(nchar(news))
+twits_cc <- summary(nchar(twits))
+
+# Number of lines in each dataset
+blogs_lc <- length(blogs)
+news_lc <- length(news)
+twits_lc <- length(twits)
+
+# Number of words in each dataset
+blogs_wc <- wordcount(blogs)
+news_wc <- wordcount(news)
+twits_wc <- wordcount(twits)
+
+# Report the summaries
+rbind(blogs_summ, news_summ, twits_summ)
+rbind(blogs_cc, news_cc, twits_cc)
+data.frame(c("Blogs", "News", "Twits"), 
+           "File size"=c(blogs_size, news_size, twits_size), 
+           "Line count"=c(blogs_lc, news_lc, twits_lc), 
+           "Word count"=c(blogs_wc, news_wc, twits_wc), 
+           row.names=1)
+```
+
+## Basic Plots
+The smaller subset of each dataset is created randomly to ease the subsequent processing steps. A corpus is created from the data subsets by:  
+
+ - removing all URLs and everything that is not an alphabet or space,  
+ - converting the remaining alphabets to lower case,   
+ - removing profane words, and   
+ - generating plain text corpus.
+
+The list of profane words is obtained from [Google](https://code.google.com/archive/p/badwordslist/downloads). Entries that contain symbols that might contaminate regular expressions are removed.
+
+```{r Create and clean corpus, cache=T, warning=F}
+# Create corpus from dataset subsets
+subset_size <- 10000
+blogs_sub <- sample(blogs, subset_size)
+news_sub <- sample(news, subset_size)
+twits_sub <- sample(twits, subset_size)
+corp <- VCorpus(VectorSource(c(blogs_sub, news_sub, twits_sub)))
+saveRDS(corp, file="./messy_corp.rds")
+
+# Clean the corpus
+delPat <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+profane_words <- read.delim("./badwords.txt", header=F)[, 1]
+corp <- tm_map(x=corp, FUN=delPat, "(f|ht)tp(s?)://(.*)[.][a-z]+")
+corp <- tm_map(x=corp, FUN=delPat, "[^a-zA-Z ]") 
+corp <- tm_map(x=corp, FUN=removePunctuation)
+corp <- tm_map(x=corp, FUN=removeNumbers)
+corp <- tm_map(x=corp, FUN=content_transformer(FUN=tolower))  # Functions are nested to avoid error
+# corp <- tm_map(x=corp, FUN=removeWords, stopwords(kind="en"))  # Produce less intuitive n-grams
+corp <- tm_map(x=corp, FUN=removeWords, profane_words)
+# corp <- tm_map(x=corp, FUN=stemDocument)  # Stemming produce less intuitive n-grams
+corp <- tm_map(x=corp, FUN=stripWhitespace)
+corp <- tm_map(x=corp, FUN=PlainTextDocument)
+saveRDS(corp, file="./corp.rds")
+```
+
+In the field of Natural Language Processing, n-gram is a contiguous sequence of n items from a given sequence of text or speech. The sentences and phrases in the corpus are then broken into pairs of words or n-grams through tokenization:
+```{r Tokenization, cache=T}
+# Define tokenization functions
+bigram <- function(x) unlist(lapply(ngrams(words(x), 2), paste, collapse=" "), use.names=FALSE)
+trigram <- function(x) unlist(lapply(ngrams(words(x), 3), paste, collapse=" "), use.names=FALSE)
+
+# Remove sparse terms to aid generalization, tune sparse parameter to return a matrix of appropriate size
+docTermMat1 <- removeSparseTerms(x=TermDocumentMatrix(corp), sparse=0.99)
+docTermMat2 <- removeSparseTerms(x=TermDocumentMatrix(corp, control=list(tokenize=bigram)), sparse=0.9993)
+docTermMat3 <- removeSparseTerms(x=TermDocumentMatrix(corp, control=list(tokenize=trigram)), sparse=0.99995)
+
+# Create frequency dataframes
+freq1 <- sort(rowSums(as.matrix(docTermMat1)), decreasing=T)
+freq2 <- sort(rowSums(as.matrix(docTermMat2)), decreasing=T)
+freq3 <- sort(rowSums(as.matrix(docTermMat3)), decreasing=T)
+df1 <- data.frame(grm=names(freq1), frq=freq1)
+df2 <- data.frame(grm=names(freq2), frq=freq2)
+df3 <- data.frame(grm=names(freq3), frq=freq3)
+```
+
+The frequencies of the more common unigrams, bigrams, and trigrams in the corpus are visualized using word clouds and histograms:
+```{r Frequency visualizations, cache=T}
+# Word clouds
+cloud1 = wordcloud2(data=df1, size=0.6, fontWeight=700, shape='circle', color='random-dark')
+cloud2 = wordcloud2(data=df2, size=1.2, fontWeight=600, shape='circle', color='random-dark')
+cloud3 = wordcloud2(data=df3, size=0.7, fontWeight=500, shape='circle', color='random-dark')
+saveWidget(widget=cloud1, file="cloud1.html", selfcontained=F)
+saveWidget(widget=cloud2, file="cloud2.html", selfcontained=F)
+saveWidget(widget=cloud3, file="cloud3.html", selfcontained=F)
+webshot(url="cloud1.html", file="cloud1.png", vwidth=700, vheight=500, delay=10)
+webshot(url="cloud2.html", file="cloud2.png", vwidth=700, vheight=500, delay=10)
+webshot(url="cloud3.html", file="cloud3.png", vwidth=700, vheight=500, delay=10)
+
+# Histograms
+ggplot(df1[1:30, ], aes(reorder(grm, -frq), frq)) + 
+  labs(title="30 Most Common Unigrams Frequency", x="Unigrams", y="Frequency") + 
+  theme(axis.text.x=element_text(angle=45, size=12, hjust=1)) + 
+  geom_bar(stat="identity", fill="darkblue")
+ggplot(df2[1:30, ], aes(reorder(grm, -frq), frq)) + 
+  labs(title="30 Most Common Bigrams Frequency", x="Bigrams", y="Frequency") + 
+  theme(axis.text.x=element_text(angle=45, size=12, hjust=1)) + 
+  geom_bar(stat="identity", fill="darkblue")
+ggplot(df3[1:30, ], aes(reorder(grm, -frq), frq)) + 
+  labs(title="30 Most Common Trigrams Frequency", x="Trigrams", y="Frequency") + 
+  theme(axis.text.x=element_text(angle=45, size=12, hjust=1)) + 
+  geom_bar(stat="identity", fill="darkblue")
+```
+
+## Interesting Findings
+The exploratory data analysis on the English dataset resulted in the following findings:  
+
+ - Blog entries have about the same length as news entries on average, which are much longer than twitter feeds.  
+ - The abundance of the n-grams is generally inversely proportional to their length.  
+ - A lot of the bigrams consist of words that originally contain apostrophe.
+ - Word stemming results in less intuitive longer n-grams.
+
+## Basic Project Plan
+The plan to continue the project is as follow:  
+
+1. Use n-gram models to predict the next word in a sequence of words:
+
+    * Tokenize the corpus from complete datasets instead of just subsets into n-grams and store in document term matrices.  
+    * Converts the matrices to dataframes of frequencies.  
+    * Implement a predictive model based on these dataframes.  
+    * Predict the next word by choosing the most frequent word in the (n+1)-grams based on the input n-grams text.  
+    
+2. create a Shiny app that allows its users to provide a text input and display an output of the predicted upcoming word.  
+3. Deploy the app and present a reproducible pitch.  

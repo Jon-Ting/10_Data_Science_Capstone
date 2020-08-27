@@ -1,0 +1,170 @@
+---
+title: "Data Science Capstone Quiz 3"
+author: "Jon Ting"
+date: "24/08/2020"
+output: html_document
+---
+
+# Setup Document
+The knitr options and libraries needed are first loaded:
+```{r Setup, warning=F, results=F}
+knitr::opts_chunk$set(echo=T)
+set.seed(77)
+suppressPackageStartupMessages(library(tm))
+```
+
+# Prepare Datasets
+The whole English dataset is rather large, consisting of more than 3 million entries in total. To reduce the time taken to implement the model, a subset of **1%** of this size is first extracted, and then split into training (80%) and validation (20%) sets. The model will be evaluated on the quiz questions so the size of the testing set is only 10:
+```{r Prepare datasets, cache=T, warning=F}
+# Load whole English dataset
+engData <- readRDS(file="../Quiz2/eng_data.rds")
+subsetProp <- 0.01
+train_val_data <- sample(x=engData, size=subsetProp * length(engData))
+
+# Train-validation split
+trainProp <- 0.8
+sampleNum <- length(x=train_val_data)
+trainIdx <- sample(x=1:sampleNum, size=sampleNum * trainProp)
+valIdx <- setdiff(x=1:sampleNum, y=trainIdx)
+train <- train_val_data[trainIdx]
+validation <- train_val_data[valIdx]
+```
+
+# Create Clean N-grams Data
+```{r Create n-grams data, cache=T}
+# Define n-gram tokenization functions
+bigram <- function(x) unlist(lapply(ngrams(words(x), 2), paste, collapse=" "), use.names=F)
+trigram <- function(x) unlist(lapply(ngrams(words(x), 3), paste, collapse=" "), use.names=F)
+quadrigram <- function(x) unlist(lapply(ngrams(words(x), 4), paste, collapse=" "), use.names=F)
+pentagram <- function(x) unlist(lapply(ngrams(words(x), 5), paste, collapse=" "), use.names=F)
+hexagram <- function(x) unlist(lapply(ngrams(words(x), 6), paste, collapse=" "), use.names=F)
+
+# Clean the corpus
+delPat <- function(strng, pat) gsub(pattern=pat, replacement=" ", x=strng)
+profaneWords <- read.delim(file="../Milestone/badwords.txt", header=F)[, 1]
+trainCorp <- VCorpus(VectorSource(train))
+trainCorp <- tm_map(x=trainCorp, FUN=content_transformer(FUN=delPat), "(f|ht)tp(s?)://(.*)[.][a-z]+")
+trainCorp <- tm_map(x=trainCorp, FUN=content_transformer(FUN=delPat), "[^a-zA-Z ]") 
+trainCorp <- tm_map(x=trainCorp, FUN=removePunctuation)
+trainCorp <- tm_map(x=trainCorp, FUN=removeNumbers)
+trainCorp <- tm_map(x=trainCorp, FUN=content_transformer(FUN=tolower))
+trainCorp <- tm_map(x=trainCorp, FUN=removeWords, stopwords(kind="en"))
+trainCorp <- tm_map(x=trainCorp, FUN=removeWords, profaneWords)
+stemTrainCorp <- tm_map(x=trainCorp, FUN=stemDocument)
+stemTrainCorp <- tm_map(x=stemTrainCorp, FUN=stripWhitespace)
+stemTrainCorp <- tm_map(x=stemTrainCorp, FUN=PlainTextDocument)
+unstemTrainCorp <- tm_map(x=trainCorp, FUN=stripWhitespace)
+unstemTrainCorp <- tm_map(x=unstemTrainCorp, FUN=PlainTextDocument)
+
+# Compute document term matrices for each n-gram (up to n=4)
+docTermMat2 <- DocumentTermMatrix(stemTrainCorp, control=list(tokenize=bigram))
+docTermMat3 <- DocumentTermMatrix(stemTrainCorp, control=list(tokenize=trigram))
+docTermMat4 <- DocumentTermMatrix(stemTrainCorp, control=list(tokenize=quadrigram))
+docTermMat5 <- DocumentTermMatrix(stemTrainCorp, control=list(tokenize=pentagram))
+docTermMat6 <- DocumentTermMatrix(stemTrainCorp, control=list(tokenize=hexagram))
+
+# Save the matrices
+saveRDS(docTermMat2, file="./dtm2.rds")
+saveRDS(docTermMat3, file="./dtm3.rds")
+saveRDS(docTermMat4, file="./dtm4.rds")
+saveRDS(docTermMat5, file="./dtm5.rds")
+saveRDS(docTermMat6, file="./dtm6.rds")
+nGramsList <- c("dtm2.rds", "dtm3.rds", "dtm4.rds", "dtm5.rds", "dtm6.rds")
+```
+
+# Implement the New Model
+```{r Predictive model, cache=T}
+
+# Apply cleaning transformations
+txtTransfrom <- function(txt) {
+  txt <- delPat(strng=txt, pat="(f|ht)tp(s?)://(.*)[.][a-z]+")
+  txt <- delPat(strng=txt, pat="[^a-zA-Z ]") 
+  txt <- removePunctuation(x=txt)
+  txt <- removeNumbers(x=txt)
+  txt <- tolower(x=txt)
+  txt <- removeWords(x=txt, words=stopwords(kind="en"))
+  txt <- removeWords(x=txt, words=profaneWords)
+  txt <- stemDocument(x=txt)
+  txt <- stripWhitespace(x=txt)
+  return(txt)
+}
+
+# Implement backoff-model
+nextWord <- function(inp_txt) { 
+  
+  # Extract usable parts from the input text
+  inp_txt <- txtTransfrom(txt=inp_txt)
+  phrase <- strsplit(x=inp_txt, split=" ")[[1]]
+  if (length(phrase) == 0) { return("No text is detected after cleaning!") }
+  else if ((length(unique(phrase)) == 1) & (unique(phrase) == "")) { return("Only spaces left after cleaning!") }
+  else if (length(phrase) > 5) {phrase <- phrase[1:5]}
+  
+  # Search for entries containing the phrase of length n in stored (n+1)-grams
+  searchOrder <- length(phrase):1
+  for (i in seq_along(searchOrder)) {
+    phrase_str <- paste(phrase[i:length(phrase)], collapse=" ")
+    docTermMat <- readRDS(file=nGramsList[searchOrder[i]])
+    grams <- docTermMat$dimnames[["Terms"]]
+    entries <- grams[grepl(pattern=phrase_str, x=grams, ignore.case=T)]
+    if (length(entries) == 0) next else break }
+  if (length(entries) == 0) { return("No similar phrase found in training data, sorry!") }
+
+  # Create a corpus from the entries containing the phrase
+  regex_str <- paste(phrase_str, "([^ ]+)")
+  targetWords <- ''
+  for (i in 1:length(entries)) { 
+    match_idx <- regexec(pattern=regex_str, text=entries[i], ignore.case=T)
+    targetWords <- c(targetWords, regmatches(x=entries[i], m=match_idx)[[1]][2]) }
+  targetWords <- targetWords[(!is.na(targetWords)) & (targetWords != "")]
+  if (length(targetWords) == 0) { return("No similar phrase found in training data, sorry!") }
+  corp <- VCorpus(VectorSource(data.frame(targetWords)))
+  
+  # Compare probability for each unigram and return the most likely word
+  targetDTM <- as.matrix(x=DocumentTermMatrix(corp))
+  freq <- sort(colSums(x=targetDTM), decreasing=T)
+  df <- data.frame(Word=names(freq), Counts=freq, Probability=freq/length(freq))
+  rownames(df) <- 1:length(freq)
+  return(stemCompletion(x=df[1, 1], dictionary=unstemTrainCorp, type="first")[[1]])
+}
+```
+
+# Estimate Computational Complexity
+Using the same phrases for the previous model, this model was also timed for comparison:
+```{r Time used, cache=T}
+system.time(expr=nextWord("in a case of"))
+system.time(expr=nextWord("a case of"))
+system.time(expr=nextWord("case of"))
+```
+
+The trend of increment in complexity as the length of input text increases is clearly shown. The time taken by the model to make a prediction for the same phrases used in previous model is shorter by about 3 orders of magnitude. This indicates the success of computing and storing the n-grams outside of the model in reducing the computational complexity of the problem.
+
+# Test the Model
+The quiz questions are answered using the prediction function defined:
+```{r Test model, cache=T, warning=F}
+# Answer quiz questions
+predictions <- ''
+predictions[1] <- nextWord("I'd live and I'd")
+predictions[2] <- nextWord("telling me about his")
+predictions[3] <- nextWord("see arctic monkeys this")
+predictions[4] <- nextWord("helps reduce your")
+predictions[5] <- nextWord("to take a")
+predictions[6] <- nextWord("to settle the")
+predictions[7] <- nextWord("groceries in each")
+predictions[8] <- nextWord("bottom to the")
+predictions[9] <- nextWord("bruises from playing")
+predictions[10] <- nextWord("of Adam Sandler's")
+predictions
+
+# Compute accuracy
+answers <- c("die", "marital", "week end", "stress", "picture", "matter", "hand", "top", "outside", "movies")
+correctNum <- 0
+for (i in 1:length(predictions)) { if (predictions[i] == answers[i]) { correctNum <- correctNum + 1} }
+correctNum / length(predictions)
+```
+
+# Conclusion  
+1. Using a smaller list of profane words would reduce some processing time of the model.  
+2. The uncertainty of the word prediction is reflected by the probability of the word returned.  
+3. The n-gram backoff-model is inefficient as each n-gram has to be stored exterior of the model. This is rather inflexible and will tend to miss out long-term dependency between words in a long phrase. The model could not make use of the context in the earlier part of an overly-long (in this case, more than 6 words) sentence.   
+4. Some of the most commonly missed n-grams are phrases that contain apostrophes. For instance, "I'd" in the first quiz question. This could potentially be fixed by using a larger training set.
+5. Validation of the model has not been carried out.

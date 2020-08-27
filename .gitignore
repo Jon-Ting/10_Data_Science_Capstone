@@ -1,0 +1,15 @@
+Coursera-SwiftKey.zip
+final/
+Quiz2/eng_data.rds
+Quiz2/quiz2_cache/
+Quiz2/rsconnect/
+Quiz3/*.rds
+Quiz3/quiz3_cache/
+Quiz3/rsconnect/
+Milestone/cloud*
+Milestone/cloud*/
+Milestone/milestone_cache/
+Milestone/rsconnect/
+Milestone/*.rds
+Capstone/rsconnect/
+Capstone/nextWord/rsconnect/

@@ -1,0 +1,90 @@
+---
+title: "Data Science Capstone Quiz 2"
+author: "Jon Ting"
+date: "25/08/2020"
+output: html_document
+---
+
+# Setup the document & load needed libraries
+```{r Setup, warning=F, results=F, cache=T}
+knitr::opts_chunk$set(echo=T)
+suppressPackageStartupMessages(library(tm))
+```
+
+# Load and combine the English datasets
+```{r Load data, cache=T, warning=F}
+blogs <- readLines("../final/en_US/en_US.blogs.txt", skipNul=T, encoding="UTF-8")
+news <- readLines("../final/en_US/en_US.news.txt", skipNul=T, encoding="UTF-8")
+twits <- readLines("../final/en_US/en_US.twitter.txt", skipNul=T, encoding="UTF-8")
+eng_data <- c(blogs, news, twits)
+saveRDS(object=eng_data, file="eng_data.rds")
+```
+
+# Implement a prediction function
+```{r Define predicion function, cache=T}
+# Define helper function & read helper file
+delPat <- content_transformer(function(strng, pat) gsub(pattern=pat, replacement=" ", x=strng))
+profane_words <- read.delim(file="../Milestone/badwords.txt", header=F)[, 1]
+
+nextWord <- function(inp_txt) { 
+  # Create a corpus from the entries containing the input text
+  entries <- eng_data[grepl(pattern=inp_txt, x=eng_data, ignore.case=T)]
+  if (length(entries) == 0) { return(data.frame(Word="-", Counts="None")) }
+  regex_str <- paste(inp_txt, "([^ ]+)")
+  targetWords <- ''
+  for (i in 1:length(entries)) { 
+    match_idx <- regexec(pattern=regex_str, text=entries[i], ignore.case=T)
+    targetWords <- c(targetWords, regmatches(x=entries[i], m=match_idx)[[1]][2]) }
+  corp <- VCorpus(VectorSource(data.frame(targetWords)))
+  
+  # Clean the corpus
+  corp <- tm_map(x=corp, FUN=delPat, "(f|ht)tp(s?)://(.*)[.][a-z]+")
+  corp <- tm_map(x=corp, FUN=delPat, "[^a-zA-Z ]") 
+  corp <- tm_map(x=corp, FUN=removePunctuation)
+  corp <- tm_map(x=corp, FUN=removeNumbers)
+  corp <- tm_map(x=corp, FUN=content_transformer(FUN=tolower))
+  corp <- tm_map(x=corp, FUN=removeWords, stopwords(kind="en"))
+  corp <- tm_map(x=corp, FUN=removeWords, profane_words)
+  corp <- tm_map(x=corp, FUN=stripWhitespace)
+  corp <- tm_map(x=corp, FUN=PlainTextDocument)
+  
+  # Compute frequencies of each word/unigram
+  docTermMat <- as.matrix(x=DocumentTermMatrix(corp))
+  freq <- sort(colSums(x=docTermMat), decreasing=T)
+  df <- data.frame(Word=names(freq), Counts=freq)
+  rownames(df) <- 1:length(freq)
+  numWord <- max(1, min(length(freq), 10))
+  return(df[1:numWord, ])
+}
+```
+
+# Estimate computational complexity
+The function was timed for different length of input text:
+```{r Time used, cache=T}
+system.time(expr=nextWord("in a case of"))
+system.time(expr=nextWord("a case of"))
+system.time(expr=nextWord("case of"))
+```
+
+The complexity of the function is found to be proportional to the length of the provided text in general. However, input phrases consisting of 3 words seem to provide some compensations in this case.
+
+# Test the algorithm
+The quiz questions are answered using the prediction function defined:
+```{r Answer quiz questions, cache=T}
+nextWord("a case of")
+nextWord("would mean the")
+nextWord("make me the")
+nextWord("struggling but")
+nextWord("date at the")
+nextWord("be on my")
+nextWord("in quite some")
+nextWord("with his little")
+nextWord("faith during the")
+nextWord("you must be")
+```
+
+# Conclusions  
+1. The function does not work all the time, especially when there are limited number of occurrences of specific phases in the training dataset.  
+2. A bit more effort is required to turn the function into a predictive model. The model needs to output one specific word, which logically has to be the word that occurs the most frequently.  
+3. The biggest advantage of the model is that any length of input text could potentially be provided, albeit the probably of finding no occurrence in the dataset increases with the input text length. On the other hand, long processing time is the main disadvantage of the model. This could potentially be fixed by avoiding for loops in the model and piping continuous expressions.  
+4. However, the downside of the current model is not feasible if a Shiny app were to be produced. The length of the input text would have to be limited to *n*. (*n+1*)-grams could potentially be created and stored up front to reduce the processing time.
